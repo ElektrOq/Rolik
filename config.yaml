@@ -2,15 +2,16 @@
 # ДОСТУПЫ И API
 # ==========================================
 elevenlabs:
-  api_key: "sk_5097577276f927c0d13511acd930fff6d1246c5cfcacbe5c"
+  api_key: "5566916825:324d556e4a664c4854344b6643744c6a7172527a53513d3d"
   voice_id: "ZthjuvLPty3kTMaNKVKb"       # ID голоса (по умолчанию Bella, замени на свой)
   model_id: "eleven_multilingual_v2"     # Модель v2 отлично говорит по-русски
+  template_uuid: "20eefddc-b15a-498a-8c81-2fc941e66d22"
 
 # ==========================================
 # ПУТИ И ФАЙЛЫ
 # ==========================================
 paths:
-  script_file: "input/script.txt"        # Тот самый файл с разметкой "ГЛАВА - 1..."
+  script_file: "input/script_export.txt"        # Тот самый файл с разметкой "ГЛАВА - 1..."
   input_images: "input/images/"          # Отсюда скрипт будет брать [1.jpg]
   input_voice: "input/voice/"            # Сюда скрипт будет скачивать mp3 от ElevenLabs
   input_video: "input/video/"
@@ -19,7 +20,7 @@ paths:
   template_dir: "template/"
 
 filenames:
-  bg_audio: "background.mp3"
+  bg_audio: "veter.mp3"
 
 # ==========================================
 # НАСТРОЙКИ ВИДЕО И АУДИО

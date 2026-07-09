@@ -1,76 +1,108 @@
 import os
-import base64
 import requests
+import time
+import zipfile
+import io
+import json
 
 class ElevenLabsAPI:
-    def __init__(self, api_key, voice_id, model_id="eleven_multilingual_v2"):
-        """
-        Инициализация модуля ElevenLabs.
-        """
+    def __init__(self, api_key, voice_id, model_id="eleven_multilingual_v2", template_uuid=None):
         self.api_key = api_key
         self.voice_id = voice_id
         self.model_id = model_id
-        # Тот самый эндпоинт, который отдает звук + тайминги
-        self.url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/with-timestamps"
+        self.template_uuid = template_uuid
+        self.base_url = "https://voiceapi.csv666.ru"
 
     def generate_audio_with_timestamps(self, text, output_path):
-        """
-        Отправляет текст, сохраняет аудио в output_path и возвращает alignment (тайминги).
-        """
-        print(f"🎙 Отправляю запрос в ElevenLabs (Текст: {len(text)} символов)...")
+        headers = {"X-API-Key": self.api_key, "Content-Type": "application/json"}
         
-        payload = {
-            "text": text,
-            "model_id": self.model_id,
-            "voice_settings": {
-                "stability": 0.5,
-                "similarity_boost": 0.75
+        print(f"\n📡 [API] Отправка текста ({len(text)} симв.) на генерацию...")
+        
+        # Строгое разделение: либо шаблон, либо настройки
+        payload = {"text": text}
+        
+        if self.template_uuid:
+            payload["template_uuid"] = self.template_uuid
+            print(f"🎭 [API] Используем готовый шаблон: {self.template_uuid}")
+        else:
+            payload["template"] = {
+                "voice_id": self.voice_id, 
+                "model_id": self.model_id,
+                "subtitles": True
             }
-        }
+            print(f"⚙️ [API] Используем настройки голоса: {self.voice_id}")
         
-        headers = {
-            "xi-api-key": self.api_key,
-            "Content-Type": "application/json"
-        }
-
-        response = requests.post(self.url, json=payload, headers=headers)
+        resp = requests.post(f"{self.base_url}/tasks", json=payload, headers=headers)
+        if resp.status_code != 200:
+            raise Exception(f"Ошибка API при создании задачи: {resp.text}")
+            
+        task_id = resp.json().get("task_id")
+        print(f"⏳ [API] Задача {task_id} создана. Ожидание обработки...")
         
-        if response.status_code != 200:
-            raise Exception(f"❌ Ошибка API ElevenLabs: {response.status_code} - {response.text}")
+        attempts = 0
+        while True:
+            time.sleep(3)
+            attempts += 1
+            status_resp = requests.get(f"{self.base_url}/tasks/{task_id}/status", headers=headers)
+            status_data = status_resp.json()
+            status = status_data.get("status")
+            
+            if status == "ending":
+                print("✅ [API] Сервер закончил генерацию!")
+                break
+            elif status == "error":
+                raise Exception(f"Сервер выдал ошибку: {status_data}")
+            
+            if attempts > 60:
+                raise Exception("Таймаут ожидания сервера.")
 
-        data = response.json()
+        print(f"📡 [API] Скачивание результата...")
+        result_resp = requests.get(f"{self.base_url}/tasks/{task_id}/result", headers=headers)
+        content = result_resp.content
         
-        # 1. Сохраняем аудио (раскодируем из base64)
-        audio_base64 = data.get("audio_base64")
-        if not audio_base64:
-            raise Exception("❌ ElevenLabs не вернул аудио!")
-            
-        audio_bytes = base64.b64decode(audio_base64)
-        with open(output_path, "wb") as f:
-            f.write(audio_bytes)
-        print(f"✅ Звук успешно скачан: {os.path.basename(output_path)}")
-            
-        # 2. Возвращаем сырые посимвольные тайминги (alignment)
-        alignment = data.get("alignment")
-        if not alignment or not alignment.get("characters"):
-            raise Exception("❌ ElevenLabs не вернул посимвольные тайминги!")
-            
-        return alignment
+        subtitles_data = {}
 
-# ==========================================
-# ТЕСТ МОДУЛЯ
-# ==========================================
-if __name__ == "__main__":
-    # Для теста впиши сюда свой реальный ключ
-    API_KEY = "ТВОЙ_КЛЮЧ"
-    VOICE_ID = "EXAVITQu4vr4xnSDxMaL"
-    
-    api = ElevenLabsAPI(API_KEY, VOICE_ID)
-    
-    test_text = "Проверка связи. Раз, два, три."
-    timings = api.generate_audio_with_timestamps(test_text, "test_output.mp3")
-    
-    print("\nСырые данные от ElevenLabs:")
-    print("Символы:", timings['characters'])
-    print("Начало:", timings['character_start_times_seconds'])
-    print("Конец:", timings['character_end_times_seconds'])
+        # Проверяем, прислал ли сервер ZIP-архив (если запрос был без UUID)
+        if content.startswith(b'PK\x03\x04'):
+            print("🗂 [API] Сервер прислал ZIP-архив! Извлекаем...")
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                for filename in z.namelist():
+                    if filename.endswith(".mp3"):
+                        with open(output_path, "wb") as f:
+                            f.write(z.read(filename))
+                        print(f"   ✅ MP3 успешно извлечен!")
+                    elif filename.endswith(".json"):
+                        try:
+                            subtitles_data = json.loads(z.read(filename).decode('utf-8'))
+                            print(f"   ✅ JSON тайминги извлечены!")
+                        except: pass
+                    elif filename.endswith(".srt"):
+                        subtitles_data = {"srt": z.read(filename).decode('utf-8')}
+                        print(f"   ✅ SRT субтитры извлечены!")
+            return subtitles_data
+        else:
+            # Сервер прислал просто аудио (потому что мы использовали шаблон)
+            print("🎵 [API] Сервер прислал обычный MP3 файл.")
+            with open(output_path, "wb") as f:
+                f.write(content)
+            
+            # ДОПОЛНИТЕЛЬНЫЙ ЗАПРОС: Пытаемся вытянуть субтитры насильно
+            print(f"📡 [API] Пытаюсь получить субтитры отдельным запросом...")
+            sub_resp = requests.get(f"{self.base_url}/tasks/{task_id}/subtitles", headers=headers)
+            
+            if sub_resp.status_code == 200:
+                sub_text = sub_resp.text.strip()
+                if sub_text.startswith("1\n00:00"): # Проверка, что это SRT формат
+                    print("✅ SRT субтитры получены отдельным запросом!")
+                    return {"srt": sub_text}
+                else:
+                    try:
+                        data = sub_resp.json()
+                        print("✅ JSON субтитры получены отдельным запросом!")
+                        return data
+                    except:
+                        print("⚠️ Сервер вернул странный формат субтитров.")
+            else:
+                print(f"⚠️ Субтитры не найдены (Код {sub_resp.status_code}). Будет использовано равномерное распределение.")
+
+            return {}

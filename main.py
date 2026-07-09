@@ -1,204 +1,484 @@
 import os
-import json
-import uuid
-import shutil
-import copy
 import yaml
+import json
 import re
+import glob
+import zipfile
 from datetime import datetime
 
-# ==========================================
-# 1. УТИЛИТЫ И КОНСТАНТЫ
-# ==========================================
+from script_parser import ScriptParser
+from elevenlabs_api import ElevenLabsAPI
+from project_builder import ProjectBuilder
+
 MICROSEC = 1_000_000
 
-def natural_sort_key(s):
-    """Сортировка: 1.jpg, 2.jpg ... 10.jpg"""
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
-
-def generate_id():
-    """Генератор уникальных ID для объектов CapCut"""
-    return str(uuid.uuid4()).upper()
-
-# ==========================================
-# 2. ФЕЙКОВЫЙ АНАЛИЗАТОР ЗВУКА
-# ==========================================
-def get_dummy_timings():
-    """Эмулируем ответ от Whisper для файла veter.mp3 (10 слов на 10 картинок)"""
-    return [
-        {"word": "Раз", "start": 0.0, "end": 0.8},
-        {"word": "два", "start": 0.8, "end": 1.5},
-        {"word": "три", "start": 1.5, "end": 2.2},
-        {"word": "четыре", "start": 2.2, "end": 2.9},
-        {"word": "пять", "start": 2.9, "end": 3.7},
-        {"word": "шесть", "start": 3.7, "end": 4.5},
-        {"word": "семь", "start": 4.5, "end": 5.1},
-        {"word": "восемь", "start": 5.1, "end": 5.8},
-        {"word": "девять", "start": 5.8, "end": 6.5},
-        {"word": "десять", "start": 6.5, "end": 7.5} # Видео будет длиться 7.5 секунд + паузы
-    ]
-
-# ==========================================
-# 3. МАТЕМАТИКА ТАЙМЛАЙНА
-# ==========================================
-def build_timeline(config, timings, image_files):
-    min_duration = config['video'].get('min_image_duration', 1.2)
-    pad_start = config['video'].get('padding_start', 0.3)
-    pad_end = config['video'].get('padding_end', 1.0)
-
-    chunks = []
-    current_start = max(0.0, timings[0]['start'] - pad_start)
-    
-    for i, timing in enumerate(timings):
-        is_last_word = (i == len(timings) - 1)
-        current_duration = timing['end'] - current_start
-        
-        # Если слово звучит дольше минимального времени или оно последнее
-        if current_duration >= min_duration or is_last_word:
-            current_end = timing['end']
-            if is_last_word:
-                current_end += pad_end
-                
-            chunks.append({
-                'start_us': int(current_start * MICROSEC),
-                'duration_us': int((current_end - current_start) * MICROSEC),
-                'end_sec': current_end
-            })
-            if not is_last_word:
-                current_start = current_end
-
-    # Назначаем картинки
-    final_timeline = []
-    for i, chunk in enumerate(chunks):
-        img_path = image_files[i % len(image_files)] # Берем картинки по кругу, если не хватает
-        chunk['image_path'] = img_path
-        final_timeline.append(chunk)
-
-    total_duration_us = int(chunks[-1]['end_sec'] * MICROSEC)
-    return final_timeline, total_duration_us
-
-# ==========================================
-# 4. ГЛАВНЫЙ КЛАСС СОБОРКИ
-# ==========================================
 class AutoVideoMaker:
     def __init__(self):
+        print("⚙️ Читаем config.yaml...")
         with open("config.yaml", 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
-            
-        paths = self.config.get('paths', {})
-        self.in_images = paths.get('input_images', 'input/images/')
-        self.in_voice = paths.get('input_voice', 'input/voice/')
-        self.template_dir = paths.get('template_dir', 'template/')
-        self.output_dir = paths.get('output_dir', 'output/')
 
-    def prepare(self):
-        # 1. Проверяем картинки
-        files = os.listdir(self.in_images)
-        self.images = sorted(
-            [os.path.join(self.in_images, f) for f in files if f.lower().endswith(('.png', '.jpg'))],
-            key=natural_sort_key
+        self.paths = self.config.get('paths', {})
+        self.out_dir = self.paths.get('output_dir', 'output/')
+        self.img_dir = self.paths.get('input_images', 'input/images/')
+        self.voice_dir = self.paths.get('input_voice', 'input/voice/')
+        self.template_dir = self.paths.get('template_dir', 'template/')
+        self.script_file = self.paths.get('script_file', 'input/script.txt')
+        self.offline_dir = os.path.join("input", "offline")
+        
+        self.bg_audio_filename = self.config.get('filenames', {}).get('bg_audio', None)
+        
+        os.makedirs(self.offline_dir, exist_ok=True)
+
+        self.elevenlabs = ElevenLabsAPI(
+            api_key=self.config['elevenlabs']['api_key'],
+            voice_id=self.config['elevenlabs']['voice_id'],
+            model_id=self.config['elevenlabs'].get('model_id', 'eleven_multilingual_v2'),
+            template_uuid=self.config['elevenlabs'].get('template_uuid')
         )
-        if not self.images: raise ValueError("Нет картинок!")
-        
-        # 2. Проверяем голос
-        audio_files = [os.path.join(self.in_voice, f) for f in os.listdir(self.in_voice) if f.lower().endswith(('.mp3', '.wav'))]
-        if not audio_files: raise ValueError("Нет файла озвучки!")
-        self.voice = audio_files[0]
-        
-        # 3. Проверка шаблона
-        if not os.path.exists(os.path.join(self.template_dir, 'draft_content.json')):
-            raise ValueError(f"В папке {self.template_dir} нет файла draft_content.json!")
 
-    def build_project(self):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        project_name = f"Draft_{timestamp}"
-        new_proj_path = os.path.join(self.output_dir, project_name)
-        
-        # 1. КОПИРУЕМ ШАБЛОН! (Вот тут магия)
-        print(f"📁 Копирую шаблон в папку: {new_proj_path}")
-        shutil.copytree(self.template_dir, new_proj_path, dirs_exist_ok=True)
-        
-        content_path = os.path.join(new_proj_path, 'draft_content.json')
-        meta_path = os.path.join(new_proj_path, 'draft_meta_info.json')
+    def generate_task_id(self):
+        return f"Task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-        # 2. Считаем таймлайн
-        timings = get_dummy_timings()
-        timeline, total_dur = build_timeline(self.config, timings, self.images)
-        print(f"📐 Математика: ролик будет длиться {total_dur / MICROSEC:.2f} сек.")
+    def _parse_time_str(self, time_str):
+        match = re.search(r'(\d+):(\d+):(\d+\.\d+)', time_str)
+        if match:
+            h, m, s = match.groups()
+            return int(h)*3600 + int(m)*60 + float(s)
+        return 0.0
 
-        # 3. Модификация JSON
-        with open(content_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-        # Обрабатываем видео/картинки
-        video_track = next((t for t in data['tracks'] if t['type'] == 'video'), None)
-        blueprint_seg = copy.deepcopy(video_track['segments'][0])
-        blueprint_mat_id = blueprint_seg['material_id']
-        blueprint_mat = next((m for m in data['materials']['videos'] if m['id'] == blueprint_mat_id), None)
-
-        data['materials']['videos'] = [m for m in data['materials']['videos'] if m.get('type') != 'photo']
-        video_track['segments'] = []
-
-        for chunk in timeline:
-            new_mat_id = generate_id()
-            new_seg_id = generate_id()
-            
-            mat = copy.deepcopy(blueprint_mat)
-            mat['id'] = new_mat_id
-            mat['path'] = os.path.abspath(chunk['image_path']).replace('\\', '/')
-            mat['material_name'] = os.path.basename(chunk['image_path'])
-            data['materials']['videos'].append(mat)
-            
-            seg = copy.deepcopy(blueprint_seg)
-            seg['id'] = new_seg_id
-            seg['material_id'] = new_mat_id
-            seg['target_timerange']['start'] = chunk['start_us']
-            seg['target_timerange']['duration'] = chunk['duration_us']
-            seg['source_timerange']['duration'] = chunk['duration_us']
-            video_track['segments'].append(seg)
-
-        # Обрабатываем эффекты (шум)
-        effect_track = next((t for t in data['tracks'] if t['type'] == 'effect'), None)
-        if effect_track:
-            for ef_seg in effect_track['segments']:
-                ef_seg['target_timerange']['start'] = 0
-                ef_seg['target_timerange']['duration'] = total_dur
+    def _parse_srt_vtt(self, text, is_vtt):
+        api_words = []
+        duration = 0.0
+        blocks = re.split(r'\n\n+', text.strip())
+        for block in blocks:
+            lines = block.split('\n')
+            if len(lines) >= 3 or (is_vtt and len(lines) >= 2):
+                time_line = ""
+                text_lines = ""
+                for i, line in enumerate(lines):
+                    if '-->' in line:
+                        time_line = line
+                        text_lines = " ".join(lines[i+1:])
+                        break
                 
-                # ФИКС: Проверяем, что значение существует и не равно None
-                if ef_seg.get('source_timerange'):
-                    ef_seg['source_timerange']['duration'] = total_dur
+                if not time_line: continue
+                
+                match = re.search(r'(\d+):(\d+):(\d+)[.,](\d+) --> (\d+):(\d+):(\d+)[.,](\d+)', time_line)
+                if match:
+                    h1, m1, s1, ms1, h2, m2, s2, ms2 = map(int, match.groups())
+                    start_sec = h1*3600 + m1*60 + s1 + ms1/1000.0
+                    end_sec = h2*3600 + m2*60 + s2 + ms2/1000.0
+                    
+                    words = re.findall(r"[^\w']+", text_lines)
+                    if words:
+                        word_dur = (end_sec - start_sec) / len(words)
+                        for i, w in enumerate(words):
+                            api_words.append({"word": w, "start": start_sec + i * word_dur, "end": start_sec + (i + 1) * word_dur})
+                    duration = max(duration, end_sec)
+        return api_words, duration
 
-        # Обрабатываем аудио (ставим твой veter.mp3)
-        audio_tracks = [t for t in data['tracks'] if t['type'] == 'audio']
-        if audio_tracks and audio_tracks[0]['segments']:
-            voice_seg = audio_tracks[0]['segments'][0]
-            voice_seg['target_timerange']['start'] = 0
-            voice_seg['target_timerange']['duration'] = total_dur
-            voice_seg['source_timerange']['duration'] = total_dur
+    def _parse_timings(self, content, ext):
+        api_words = []
+        duration = 30.0
+
+        if ext == '.json':
+            data = json.loads(content) if isinstance(content, str) else content
+            if "words" in data:
+                for w in data["words"]:
+                    api_words.append({"word": w["word"], "start": float(w["start"]), "end": float(w["end"])})
+                
+                # БЕРЕМ РЕАЛЬНУЮ ФИЗИЧЕСКУЮ ДЛИНУ АУДИОФАЙЛА
+                dur = data.get("duration_seconds") or data.get("duration")
+                if not dur and api_words:
+                    dur = api_words[-1]["end"]
+                duration = float(dur) if dur else 30.0
+                
+            elif "srt" in data:
+                api_words, duration = self._parse_srt_vtt(data["srt"], False)
+            elif "characters" in data:
+                chars = data["characters"]
+                starts = data["character_start_times_seconds"]
+                ends = data["character_end_times_seconds"]
+                cur_w, cur_s = "", None
+                for i, char in enumerate(chars):
+                    if re.match(r"[\w']", char):
+                        if cur_s is None: cur_s = starts[i]
+                        cur_w += char
+                    else:
+                        if cur_w:
+                            api_words.append({"word": cur_w, "start": cur_s, "end": ends[i-1]})
+                            cur_w, cur_s = "", None
+                if cur_w:
+                    api_words.append({"word": cur_w, "start": cur_s, "end": ends[-1]})
+                    
+                dur = data.get("duration_seconds") or data.get("duration")
+                if not dur and ends:
+                    dur = ends[-1]
+                duration = float(dur) if dur else 30.0
+
+        elif ext in ['.srt', '.vtt']:
+            api_words, duration = self._parse_srt_vtt(content, ext == '.vtt')
             
-            for m in data['materials']['audios']:
-                if m['id'] == voice_seg['material_id']:
-                    m['path'] = os.path.abspath(self.voice).replace('\\', '/')
-                    m['name'] = os.path.basename(self.voice)
-                    m['duration'] = total_dur
+        elif ext == '.ass':
+            lines = content.split('\n')
+            for line in lines:
+                if line.startswith('Dialogue:'):
+                    parts = line.split(',', 9)
+                    if len(parts) >= 10:
+                        start_str, end_str = parts[1], parts[2]
+                        text = parts[9].replace(r'\N', ' ').replace(r'\n', ' ')
+                        start_sec = self._parse_time_str(start_str)
+                        end_sec = self._parse_time_str(end_str)
+                        words = re.findall(r"[\w']+", text)
+                        if words:
+                            word_dur = (end_sec - start_sec) / len(words)
+                            for i, w in enumerate(words):
+                                api_words.append({"word": w, "start": start_sec + i * word_dur, "end": start_sec + (i + 1) * word_dur})
+                        duration = max(duration, end_sec)
+        
+        return api_words, duration
 
-        data['duration'] = total_dur
-        with open(content_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    def run(self):
+        print("========================================")
+        print("ВЫБЕРИТЕ РЕЖИМ РАБОТЫ:")
+        print("1 - API (Онлайн генерация ElevenLabs)")
+        print("2 - АРХИВЫ (Офлайн из папки input/offline/)")
+        print("========================================")
+        mode = input("Ваш выбор (1 или 2): ").strip()
+        
+        if mode not in ['1', '2']:
+            print("❌ Неверный выбор. Завершение работы.")
+            return
 
-        # 4. Обновляем мету (иначе CapCut не покажет длину проекта)
+        print("\n🚀 Запуск генерации контента...\n" + "="*40)
+        task_id = self.generate_task_id()
+        task_folder = os.path.join(self.out_dir, task_id)
+        os.makedirs(task_folder, exist_ok=True)
+
+        result_log = {"task_id": task_id, "created_at": str(datetime.now()), "total_duration_sec": 0, "chapters": []}
+        global_timeline, audio_timeline = [], []
+        
+        global_time_offset = 0.0 
+
+        try:
+            parser = ScriptParser()
+            chapters = parser.parse(self.script_file)
+
+            for ch in chapters:
+                chapter_name = ch['name']
+                print(f"\n⚙️ Обработка: {chapter_name}")
+
+                slide_texts = [s['text'] for s in ch['slides']]
+                full_text = " ".join(slide_texts)
+                if not full_text.strip(): continue
+
+                api_words = []
+                chapter_duration = 30.0
+                current_img_dir = self.img_dir
+                mp3_path = os.path.join(self.voice_dir, f"{chapter_name}.mp3")
+
+                if mode == '1':
+                    api_result = self.elevenlabs.generate_audio_with_timestamps(full_text, mp3_path)
+                    with open(os.path.join(task_folder, f"debug_{chapter_name}.json"), 'w', encoding='utf-8') as f:
+                        json.dump(api_result, f, ensure_ascii=False, indent=2)
+                    
+                    api_words, chapter_duration = self._parse_timings(api_result, '.json')
+
+                elif mode == '2':
+                    ch_num_match = re.search(r'\d+', chapter_name)
+                    ch_num = ch_num_match.group() if ch_num_match else chapter_name
+                    
+                    archive_path = os.path.join(self.offline_dir, f"{ch_num}.zip")
+                    if not os.path.exists(archive_path):
+                        archive_path = os.path.join(self.offline_dir, f"{chapter_name}.zip")
+                        
+                    if os.path.exists(archive_path):
+                        archive_name = os.path.splitext(os.path.basename(archive_path))[0]
+                        extract_dir = os.path.join(task_folder, f"offline_{archive_name}")
+                        print(f"📦 Распаковываю архив: {archive_path} в {extract_dir}")
+                        os.makedirs(extract_dir, exist_ok=True)
+                        
+                        with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                            zip_ref.extractall(extract_dir)
+                            
+                        mp3_files = glob.glob(os.path.join(extract_dir, "*.mp3"))
+                        if mp3_files: 
+                            mp3_path = mp3_files[0]
+                            print(f"🎵 Звук найден: {os.path.basename(mp3_path)}")
+                            
+                        timing_files = glob.glob(os.path.join(extract_dir, "*.json")) + \
+                                       glob.glob(os.path.join(extract_dir, "*.srt")) + \
+                                       glob.glob(os.path.join(extract_dir, "*.vtt")) + \
+                                       glob.glob(os.path.join(extract_dir, "*.ass"))
+                                       
+                        if timing_files:
+                            timing_file = timing_files[0]
+                            ext = os.path.splitext(timing_file)[1].lower()
+                            print(f"⏱ Найден файл таймингов: {os.path.basename(timing_file)}")
+                            
+                            with open(timing_file, 'r', encoding='utf-8') as tf:
+                                content = tf.read()
+                            api_words, chapter_duration = self._parse_timings(content, ext)
+                    else:
+                        print(f"⚠️ Архив для {chapter_name} не найден! Использую равномерное распределение.")
+
+                audio_timeline.append({
+                    "path": os.path.abspath(mp3_path).replace('\\', '/'),
+                    "name": os.path.basename(mp3_path),
+                    "start_us": int(global_time_offset * MICROSEC),
+                    "duration_us": int(chapter_duration * MICROSEC)
+                })
+
+                chapter_log = {"name": chapter_name, "audio": os.path.basename(mp3_path), "slides": []}
+
+                api_clean = []
+                api_mapping = []
+                if api_words:
+                    for idx, w in enumerate(api_words):
+                        cleaned = re.sub(r"[^\w']", '', w['word'].lower())
+                        if cleaned:
+                            api_clean.append(cleaned)
+                            api_mapping.append(idx)
+
+                if api_clean:
+                    print("🎯 Сканер синхронизации активен...")
+                    slide_starts = [0.0] * len(ch['slides'])
+                    slide_starts[0] = api_words[0]['start']
+                    current_clean_idx = 0
+                    
+                    for i in range(1, len(ch['slides'])):
+                        prev_slide = ch['slides'][i-1]
+                        prev_raw = re.sub(r'\[.*?\]', '', prev_slide['text'])
+                        prev_raw = re.sub(r'(?i)ГЛАВА\s*-\s*\d+', '', prev_raw)
+                        prev_words = [re.sub(r"[^\w']", '', w.lower()) for w in prev_raw.split()]
+                        prev_words = [w for w in prev_words if w]
+
+                        slide = ch['slides'][i]
+                        raw_text = re.sub(r'\[.*?\]', '', slide['text'])
+                        raw_text = re.sub(r'(?i)ГЛАВА\s*-\s*\d+', '', raw_text)
+                        
+                        words = [re.sub(r"[^\w']", '', w.lower()) for w in raw_text.split()]
+                        words = [w for w in words if w]
+                        
+                        if not words:
+                            slide_starts[i] = slide_starts[i-1]
+                            continue
+                            
+                        # Сдвигаем радар на 30% слов прошлого слайда, чтобы не цеплять прошлый текст
+                        jump = max(1, int(len(prev_words) * 0.3))
+                        current_clean_idx += jump
+                        if current_clean_idx >= len(api_clean):
+                            current_clean_idx = len(api_clean) - 1
+
+                        found_idx = current_clean_idx
+                        found = False
+                        
+                        # Ищем точное совпадение
+                        for L in [4, 3, 2]:
+                            if found: break
+                            for shift in range(min(15, len(words))):
+                                if found: break
+                                prefix = words[shift : shift+L]
+                                if len(prefix) < L: continue
+                                
+                                search_limit = min(current_clean_idx + 600, len(api_clean) - L + 1)
+                                if L == 2: search_limit = min(current_clean_idx + 150, len(api_clean) - L + 1)
+                                    
+                                for j in range(current_clean_idx, search_limit):
+                                    if api_clean[j:j+L] == prefix:
+                                        found_idx = max(current_clean_idx, j - shift)
+                                        found = True
+                                        break
+                                        
+                        # Если не нашли цепочку, ищем хотя бы одно длинное уникальное слово из начала
+                        if not found:
+                            for shift in range(min(10, len(words))):
+                                if found: break
+                                word = words[shift]
+                                if len(word) <= 3: continue 
+                                
+                                search_limit = min(current_clean_idx + 150, len(api_clean))
+                                for j in range(current_clean_idx, search_limit):
+                                    if api_clean[j] == word:
+                                        found_idx = max(current_clean_idx, j - shift)
+                                        found = True
+                                        break
+
+                        if found:
+                            real_api_idx = api_mapping[found_idx]
+                            slide_starts[i] = api_words[real_api_idx]['start']
+                            current_clean_idx = found_idx
+                        else:
+                            # ==========================================
+                            # ЧЕСТНАЯ ЗАПИСЬ ОШИБОК ДЛЯ РУЧНОЙ ПРАВКИ
+                            # ==========================================
+                            err_msg = f"⚠️ РАССИНХРОН | Глава: {chapter_name} | Слайд: {slide['image']}\n"
+                            err_msg += f"   ➤ Мы искали этот текст: {' '.join(words[:7])}...\n"
+                            
+                            start_ctx = max(0, current_clean_idx - 5)
+                            end_ctx = min(len(api_clean), current_clean_idx + 20)
+                            context_json = api_clean[start_ctx:end_ctx]
+                            
+                            err_msg += f"   ➤ В JSON в этот момент находится: {' '.join(context_json)}\n"
+                            err_msg += "-"*60
+                            print(err_msg)
+                            
+                            with open(os.path.join(task_folder, "sync_errors_debug.txt"), "a", encoding="utf-8") as f_err:
+                                f_err.write(err_msg + "\n")
+                                
+                            # Чтобы глобальный таймлайн не посыпался, ставим примерное время (0.3с на слово прошлого слайда)
+                            slide_starts[i] = slide_starts[i-1] + (len(prev_words) * 0.3)
+                            if slide_starts[i] > chapter_duration:
+                                slide_starts[i] = chapter_duration - 1.0
+                                
+                            # Сдвигаем индекс дальше, чтобы следующий слайд смог зацепиться
+                            current_clean_idx = min(current_clean_idx + len(words), len(api_clean) - 1)
+
+                    # Формируем финальные тайминги слайдов для текущей главы
+                    for i, slide in enumerate(ch['slides']):
+                        local_start = slide_starts[i]
+                        
+                        if i < len(ch['slides']) - 1:
+                            local_end = slide_starts[i+1]
+                        else:
+                            # Последний слайд строго растягивается до конца физического аудиофайла
+                            local_end = chapter_duration
+                            
+                        # Защита от нулевой или отрицательной длины (чтобы CapCut не крашнулся)
+                        if local_end <= local_start:
+                            local_end = local_start + 1.0
+                            
+                        local_duration = local_end - local_start
+                        self._add_to_timeline(slide, local_start, local_duration, global_time_offset, global_timeline, chapter_log, current_img_dir)
+                        
+                else:
+                    print("⚠️ Нет данных для синхронизации. Равномерное распределение.")
+                    slide_dur = chapter_duration / len(ch['slides'])
+                    for i, slide in enumerate(ch['slides']):
+                        s_start = i * slide_dur
+                        self._add_to_timeline(slide, s_start, slide_dur, global_time_offset, global_timeline, chapter_log, current_img_dir)
+
+                result_log["chapters"].append(chapter_log)
+                
+                # Прибавляем строгую длину аудиофайла. Следующая глава начнется идеально ровно.
+                global_time_offset += chapter_duration
+
+            result_log["total_duration_sec"] = round(global_time_offset, 2)
+            total_duration_us = int(global_time_offset * MICROSEC)
+
+            log_path = os.path.join(task_folder, "result_log.json")
+            with open(log_path, 'w', encoding='utf-8') as f:
+                json.dump(result_log, f, ensure_ascii=False, indent=2)
+
+            print("\n🛠 Начинаю сборку проекта CapCut...")
+            
+            for item in audio_timeline:
+                if 'name' not in item:
+                    item['name'] = os.path.basename(item['path'])
+
+            builder = ProjectBuilder(self.template_dir, task_folder)
+            builder.build(global_timeline, audio_timeline, total_duration_us)
+            
+            self._fix_background_audio(task_folder, total_duration_us, extract_dir if mode == '2' and 'extract_dir' in locals() else None)
+
+            print("="*40)
+            print(f"🎉 ГОТОВО! Проект собран в папке: {task_folder}")
+
+        except Exception as e:
+            print(f"\n❌ Критическая ошибка: {e}")
+
+    def _fix_background_audio(self, task_folder, total_duration_us, archive_extract_dir=None):
+        if not self.bg_audio_filename:
+            return
+
+        possible_paths = [
+            os.path.join("input", self.bg_audio_filename),
+            os.path.join("input", "voice", self.bg_audio_filename),
+            os.path.join("input", "audio", self.bg_audio_filename),
+            self.bg_audio_filename
+        ]
+        
+        if archive_extract_dir:
+            possible_paths.append(os.path.join(archive_extract_dir, self.bg_audio_filename))
+        
+        bg_path_abs = None
+        for p in possible_paths:
+            if os.path.exists(p):
+                bg_path_abs = os.path.abspath(p).replace('\\', '/')
+                break
+                
+        if not bg_path_abs:
+            print(f"⚠️ ВНИМАНИЕ: Фоновая музыка '{self.bg_audio_filename}' не найдена!")
+            return
+
+        content_path = os.path.join(task_folder, "draft_content.json")
+        meta_path = os.path.join(task_folder, "draft_meta_info.json")
+
+        old_bg_ids = []
+
+        if os.path.exists(content_path):
+            with open(content_path, 'r', encoding='utf-8') as f:
+                content_data = json.load(f)
+                
+            if "materials" in content_data and "audios" in content_data["materials"]:
+                for aud in content_data["materials"]["audios"]:
+                    name = aud.get("name", "").lower()
+                    if not name.startswith("chapter_") and not name.startswith("result"):
+                        old_bg_ids.append(aud["id"])
+                        aud["path"] = bg_path_abs
+                        aud["name"] = os.path.basename(bg_path_abs)
+            
+            if old_bg_ids and "tracks" in content_data:
+                for track in content_data["tracks"]:
+                    if track.get("type") == "audio":
+                        for seg in track.get("segments", []):
+                            if seg.get("material_id") in old_bg_ids:
+                                if "target_timerange" in seg:
+                                    seg["target_timerange"]["duration"] = total_duration_us
+                                if "source_timerange" in seg:
+                                    seg["source_timerange"]["duration"] = total_duration_us
+
+            with open(content_path, 'w', encoding='utf-8') as f:
+                json.dump(content_data, f, ensure_ascii=False, indent=2)
+
         if os.path.exists(meta_path):
             with open(meta_path, 'r', encoding='utf-8') as f:
-                meta = json.load(f)
-            meta['tm_duration'] = total_dur
-            meta['draft_name'] = project_name
-            with open(meta_path, 'w', encoding='utf-8') as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
+                meta_data = json.load(f)
 
-        print(f"✅ Готово! Проект собран.")
-        print(f"👉 Скопируй папку {new_proj_path} в свои черновики CapCut и проверь результат!")
+            if "draft_materials" in meta_data:
+                for mat_group in meta_data["draft_materials"]:
+                    if isinstance(mat_group.get("value"), list):
+                        for item in mat_group["value"]:
+                            if item.get("metetype") == "music":
+                                extra_info = item.get("extra_info", "").lower()
+                                if not extra_info.startswith("chapter_") and not extra_info.startswith("result"):
+                                    item["file_Path"] = bg_path_abs
+                                    item["extra_info"] = os.path.basename(bg_path_abs)
+
+            with open(meta_path, 'w', encoding='utf-8') as f:
+                json.dump(meta_data, f, ensure_ascii=False, indent=2)
+                
+        print(f"🎵 Фон '{self.bg_audio_filename}' успешно вшит поверх старого шаблона!")
+
+    def _add_to_timeline(self, slide, start_sec, dur_sec, offset, timeline, log, custom_img_dir):
+        img_name = slide['image'].strip('[]')
+        img_path = os.path.join(self.img_dir, img_name)
+            
+        img_abs_path = os.path.abspath(img_path).replace('\\', '/')
+        timeline.append({
+            "image": img_name,
+            "path": img_abs_path,
+            "start_us": int((offset + start_sec) * MICROSEC),
+            "duration_us": int(dur_sec * MICROSEC)
+        })
+        log['slides'].append({
+            "image": img_name,
+            "start_sec": round(offset + start_sec, 2),
+            "duration_sec": round(dur_sec, 2),
+            "text": slide['text']
+        })
 
 if __name__ == "__main__":
     app = AutoVideoMaker()
-    app.prepare()
-    app.build_project()
+    app.run()
