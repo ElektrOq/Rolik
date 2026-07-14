@@ -1,0 +1,6 @@
+{
+  "name": "AI Video Architect",
+  "description": "Generate comprehensive, logically structured YouTube scripts with timestamps, voiceovers, image generation prompts, and editing cues.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
