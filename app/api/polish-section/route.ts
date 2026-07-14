@@ -1,40 +1,33 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
+import { GEMINI_MODEL } from "@/lib/gemini-model";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY || "",
 });
 
 async function generateWithRetry(config: any, maxRetries = 3) {
-  const modelQueue = [config.model, 'gemini-flash-latest', 'gemini-3.5-flash'].filter((m, idx, self) => m && self.indexOf(m) === idx);
-
   let lastError: any = null;
-  for (const currentModel of modelQueue) {
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        const activeConfig = { ...config, model: currentModel };
-        return await ai.models.generateContent(activeConfig);
-      } catch (error: any) {
-        lastError = error;
-        console.warn(`Failed with model ${currentModel} (Attempt ${i + 1}/${maxRetries}): ${error.message || error}`);
-        
-        const isTransient = error.status === 429 || error.status === 503 || error.message?.includes('429') || error.message?.includes('503');
-        if (isTransient) {
-          const delay = (i + 1) * 2000;
-          await new Promise(resolve => setTimeout(resolve, delay));
-        } else {
-          break;
-        }
-      }
+
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await ai.models.generateContent({ ...config, model: GEMINI_MODEL });
+    } catch (error: any) {
+      lastError = error;
+      console.warn(`Gemini request failed (Attempt ${i + 1}/${maxRetries}): ${error.message || error}`);
+
+      const isTransient = error.status === 429 || error.status === 503 || error.message?.includes('429') || error.message?.includes('503');
+      if (!isTransient) break;
+      await new Promise(resolve => setTimeout(resolve, (i + 1) * 2000));
     }
-    console.log(`Switching to fallback model in queue...`);
   }
-  throw lastError || new Error("All models in queue failed.");
+
+  throw lastError || new Error("Gemini request failed.");
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const { section, scenes, previousText, topic, model } = await req.json();
+    const { section, scenes, previousText, topic } = await req.json();
 
     const prompt = `Ты — профессиональный редактор исторических документальных фильмов и сценарист.
 Твоя задача — отредактировать текст диктора (voiceover) для сцен в текущей главе, чтобы ПОЛНОСТЬЮ убрать смысловые повторы с предыдущими главами, убрать "воду", лишнюю философию и улучшить плотность информации.
@@ -66,7 +59,7 @@ ${JSON.stringify(scenes.map((s: any) => ({ id: s.id, voiceover: s.voiceover })),
 ]`;
 
     const response = await generateWithRetry({
-      model: model || "gemini-3.5-flash",
+      model: GEMINI_MODEL,
       contents: prompt,
     }) as any;
 

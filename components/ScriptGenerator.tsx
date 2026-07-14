@@ -17,7 +17,6 @@ export default function ScriptGenerator() {
   const [script, setScript] = useState<VideoScript | null>(null);
   const [scenes, setScenes] = useState<Record<number, any>>({});
   const [error, setError] = useState('');
-  const [model, setModel] = useState("gemini-3.5-flash");
 
   const handleSaveProject = () => {
     const data = {
@@ -173,7 +172,7 @@ export default function ScriptGenerator() {
       const response = await fetch('/api/generate-outline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ topic, durationMinutes, style, model }),
+        body: JSON.stringify({ topic, durationMinutes, style }),
       });
 
       if (!response.ok) {
@@ -316,26 +315,7 @@ export default function ScriptGenerator() {
             </div>
           </div>
 
-          <div>
-            <label htmlFor="model" className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
-              ИИ Модель для генерации
-            </label>
-            <div className="mt-2">
-              <select
-                id="model"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                className="block w-full rounded border border-[#2D2E32] bg-[#0A0B0E] py-3 px-4 text-[#D1D5DB] shadow-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 sm:text-sm sm:leading-6"
-              >
-                <option value="gemini-3.5-flash">Gemini 3.5 Flash (Рекомендуемая, сбалансированная)</option>
-                <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (Мощная, но медленная)</option>
-                <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (Самая быстрая)</option>
-              </select>
-            </div>
-            <p className="mt-2 text-[10px] text-slate-500 font-mono">
-              Генерация может занимать время, так как ИИ выполняет до 6 попыток для точного соблюдения длины английского текста (± 5 символов).
-            </p>
-          </div>
+
 
           {error && (
             <div className="rounded bg-red-950/30 p-4 text-[11px] font-mono text-red-400 border border-red-900/50">
@@ -410,7 +390,7 @@ export default function ScriptGenerator() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.1 }}
         >
-          <ScriptResult script={script} setScript={setScript} topic={topic} style={style} visualStyle={visualStyle} character={character} sceneDuration={sceneDuration} scenes={scenes} setScenes={setScenes} model={model} />
+          <ScriptResult script={script} setScript={setScript} topic={topic} style={style} visualStyle={visualStyle} character={character} sceneDuration={sceneDuration} scenes={scenes} setScenes={setScenes} />
         </motion.div>
       )}
     </div>

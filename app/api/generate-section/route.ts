@@ -2,6 +2,7 @@ export const maxDuration = 300;
 
 import { GoogleGenAI, Type } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
+import { GEMINI_MODEL } from "@/lib/gemini-model";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -13,35 +14,27 @@ const ai = new GoogleGenAI({
 });
 
 async function generateWithRetry(config: any, maxRetries = 3) {
-  const modelQueue = [config.model, 'gemini-flash-latest', 'gemini-3.5-flash'].filter((m, idx, self) => m && self.indexOf(m) === idx);
-
   let lastError: any = null;
-  for (const currentModel of modelQueue) {
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        const activeConfig = { ...config, model: currentModel };
-        return await ai.models.generateContent(activeConfig);
-      } catch (error: any) {
-        lastError = error;
-        console.warn(`Failed with model ${currentModel} (Attempt ${i + 1}/${maxRetries}): ${error.message || error}`);
-        
-        const isTransient = error.status === 429 || error.status === 503 || error.message?.includes('429') || error.message?.includes('503');
-        if (isTransient) {
-          const delay = (i + 1) * 2000;
-          await new Promise(resolve => setTimeout(resolve, delay));
-        } else {
-          break;
-        }
-      }
+
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await ai.models.generateContent({ ...config, model: GEMINI_MODEL });
+    } catch (error: any) {
+      lastError = error;
+      console.warn(`Gemini request failed (Attempt ${i + 1}/${maxRetries}): ${error.message || error}`);
+
+      const isTransient = error.status === 429 || error.status === 503 || error.message?.includes('429') || error.message?.includes('503');
+      if (!isTransient) break;
+      await new Promise(resolve => setTimeout(resolve, (i + 1) * 2000));
     }
-    console.log(`Switching to fallback model in queue...`);
   }
-  throw lastError || new Error("All models in queue failed.");
+
+  throw lastError || new Error("Gemini request failed.");
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const { topic, style, visualStyle, character, sceneDuration, section, globalStartTime, videoTitle, model, isLastSection, sectionIndex = 0, allSectionTitles = [], allSections = [] } = await req.json();
+    const { topic, style, visualStyle, character, sceneDuration, section, globalStartTime, videoTitle, isLastSection, sectionIndex = 0, allSectionTitles = [], allSections = [] } = await req.json();
 
     const currentSceneDuration = sceneDuration || 15;
     const targetCharCount = Math.round(currentSceneDuration * 15);
@@ -146,7 +139,7 @@ ${batchStart === 0 ? `Обрати внимание: первая сцена э�
       let textBatchData: any[] = [];
       for (let attempt = 0; attempt < 4; attempt++) {
         const response = await generateWithRetry({
-          model: model || "gemini-3.5-flash",
+          model: GEMINI_MODEL,
           contents: textPromptContents,
           config: {
             responseMimeType: "application/json",
@@ -211,7 +204,7 @@ ${JSON.stringify(textBatchData, null, 2)}
 - editingCue: Инструкции по монтажу (Editing Cue, на русском).`;
 
       const visualResponse = await generateWithRetry({
-        model: model || "gemini-3.5-flash",
+        model: GEMINI_MODEL,
         contents: visualPromptContents,
         config: {
           responseMimeType: "application/json",

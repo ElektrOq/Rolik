@@ -1,12 +1,12 @@
 'use client';
 
 import { VideoScript, VideoSection, VideoScene } from '@/types/script';
-import { RefreshCw, Clock, Image as ImageIcon, Video, Scissors, FileText, CheckCircle2, PlayCircle, Loader2, Copy, Languages, Download, Archive, ChevronDown, ChevronUp } from 'lucide-react';
+import { RefreshCw, Clock, Image as ImageIcon, Video, Scissors, FileText, CheckCircle2, PlayCircle, Loader2, Copy, Languages, Download, Archive, ChevronDown, ChevronUp, Home, ArrowLeft, ArrowRight } from 'lucide-react';
 import * as motion from "motion/react-client";
 import { useState } from 'react';
 import JSZip from 'jszip';
 
-export default function ScriptResult({ script, setScript, topic, style, visualStyle, character, sceneDuration, scenes, setScenes, model = 'gemini-3.5-flash' }: { script: VideoScript; setScript: React.Dispatch<React.SetStateAction<VideoScript | null>>; topic: string; style: string; visualStyle: string; character?: string; sceneDuration?: number; scenes: Record<number, VideoScene[]>; setScenes: React.Dispatch<React.SetStateAction<Record<number, VideoScene[]>>>; model?: string }) {
+export default function ScriptResult({ script, setScript, topic, style, visualStyle, character, sceneDuration, scenes, setScenes }: { script: VideoScript; setScript: React.Dispatch<React.SetStateAction<VideoScript | null>>; topic: string; style: string; visualStyle: string; character?: string; sceneDuration?: number; scenes: Record<number, VideoScene[]>; setScenes: React.Dispatch<React.SetStateAction<Record<number, VideoScene[]>>> }) {
   const [copiedIndex, setCopiedIndex] = useState<string | null>(null);
   const [loadingSection, setLoadingSection] = useState<Record<number, boolean>>({});
   const [loadingVideoPrompt, setLoadingVideoPrompt] = useState<Record<string, boolean>>({});
@@ -247,7 +247,6 @@ export default function ScriptResult({ script, setScript, topic, style, visualSt
             sceneDuration,
             videoTitle: script.title,
             section,
-            model,
             globalStartTime,
             isLastSection,
             sectionIndex,
@@ -298,9 +297,7 @@ export default function ScriptResult({ script, setScript, topic, style, visualSt
           topic,
           style,
           visualStyle,
-          character,
-          model
-        }),
+          character}),
       });
       if (!response.ok) throw new Error('Failed to generate visual prompt');
       const data = await response.json();
@@ -341,7 +338,6 @@ export default function ScriptResult({ script, setScript, topic, style, visualSt
           imagePrompt: scene.imagePrompt || '',
           voiceover: scene.voiceover || scene.voiceoverEn || '',
           topic,
-          model,
           style,
           visualStyle,
           character,
@@ -445,9 +441,7 @@ export default function ScriptResult({ script, setScript, topic, style, visualSt
                 topic,
                 style,
                 visualStyle,
-                character,
-                model
-              }),
+                character}),
             });
             if (!response.ok) throw new Error('Failed to generate video prompts');
             const data = await response.json();
@@ -516,7 +510,6 @@ export default function ScriptResult({ script, setScript, topic, style, visualSt
           scenes: sectionScenes,
           previousText,
           topic,
-          model,
         }),
       });
 
@@ -583,9 +576,7 @@ export default function ScriptResult({ script, setScript, topic, style, visualSt
                 topic,
                 style,
                 visualStyle,
-                character,
-                model
-              }),
+                character}),
             });
 
             if (!response.ok) throw new Error('Failed to generate visuals');
@@ -655,9 +646,7 @@ export default function ScriptResult({ script, setScript, topic, style, visualSt
                 topic,
                 style,
                 visualStyle,
-                character,
-                model
-              }),
+                character}),
             });
             if (!response.ok) throw new Error('Failed to generate video prompts');
             const data = await response.json();
@@ -716,7 +705,7 @@ export default function ScriptResult({ script, setScript, topic, style, visualSt
             const response = await fetch('/api/translate-project', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ scenes: batch, model }),
+              body: JSON.stringify({ scenes: batch }),
             });
             if (!response.ok) throw new Error('Translation failed');
             const data = await response.json();
@@ -769,8 +758,18 @@ export default function ScriptResult({ script, setScript, topic, style, visualSt
     });
   });
 
+  const scrollToChapter = (chapterIndex: number) => {
+    const target = script.sections[chapterIndex];
+    if (!target) return;
+    document.getElementById(`section-${target.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const scrollToHome = () => {
+    document.getElementById('script-home')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   return (
-    <div className="flex flex-col lg:flex-row gap-8 items-start pb-20">
+    <div id="script-home" className="flex flex-col lg:flex-row gap-8 items-start pb-20 scroll-mt-4">
       
       {/* Left side: Content */}
       <div className="w-full lg:flex-1 space-y-6">
@@ -920,6 +919,39 @@ export default function ScriptResult({ script, setScript, topic, style, visualSt
               transition={{ delay: index * 0.1 }}
               className="overflow-hidden rounded bg-[#0A0B0E] border border-[#2D2E32]"
             >
+              <div className="flex flex-wrap items-center justify-start gap-2 border-b border-[#2D2E32] bg-[#111318] px-4 py-3 sm:px-6">
+                <button
+                  type="button"
+                  onClick={scrollToHome}
+                  className="inline-flex items-center gap-1.5 rounded border border-[#3A3D44] bg-[#24272D] px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-300 transition-all duration-300 hover:-translate-y-0.5 hover:border-slate-400 hover:bg-[#30343B] hover:text-white"
+                >
+                  <Home className="h-3.5 w-3.5" />
+                  На главную
+                </button>
+
+                {index > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => scrollToChapter(index - 1)}
+                    className="inline-flex items-center gap-1.5 rounded border border-[#3A3D44] bg-[#24272D] px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-300 transition-all duration-300 hover:-translate-y-0.5 hover:border-slate-400 hover:bg-[#30343B] hover:text-white"
+                  >
+                    <ArrowLeft className="h-3.5 w-3.5" />
+                    К прошлой главе
+                  </button>
+                )}
+
+                {index < script.sections.length - 1 && (
+                  <button
+                    type="button"
+                    onClick={() => scrollToChapter(index + 1)}
+                    className="inline-flex items-center gap-1.5 rounded border border-[#3A3D44] bg-[#24272D] px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-300 transition-all duration-300 hover:-translate-y-0.5 hover:border-slate-400 hover:bg-[#30343B] hover:text-white"
+                  >
+                    К следующей главе
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+
               <div className="border-b border-[#2D2E32] bg-[#16181D]">
                 {/* Desktop Version */}
                 <div className="hidden lg:flex px-6 py-8 items-center justify-between relative min-h-[140px]">

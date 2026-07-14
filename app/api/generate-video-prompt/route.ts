@@ -1,6 +1,7 @@
 export const maxDuration = 300;
 import { GoogleGenAI } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
+import { GEMINI_MODEL } from "@/lib/gemini-model";
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -12,17 +13,17 @@ const ai = new GoogleGenAI({
 });
 
 async function generateWithRetry(config: any, maxRetries = 3) {
-  const modelQueue = [config.model, 'gemini-flash-latest', 'gemini-3.5-flash'].filter((m, idx, self) => m && self.indexOf(m) === idx);
+  const modelQueue = [GEMINI_MODEL];
 
   let lastError: any = null;
   for (const currentModel of modelQueue) {
     for (let i = 0; i < maxRetries; i++) {
       try {
-        const activeConfig = { ...config, model: currentModel };
+        const activeConfig = { ...config, model: GEMINI_MODEL };
         return await ai.models.generateContent(activeConfig);
       } catch (error: any) {
         lastError = error;
-        console.warn(`Failed with model ${currentModel} (Attempt ${i + 1}/${maxRetries}): ${error.message || error}`);
+        console.warn(`Gemini request failed (Attempt ${i + 1}/${maxRetries}): ${error.message || error}`);
         
         const isTransient = error.status === 429 || error.status === 503 || error.message?.includes('429') || error.message?.includes('503');
         if (isTransient) {
@@ -34,14 +35,14 @@ async function generateWithRetry(config: any, maxRetries = 3) {
         }
       }
     }
-    console.log(`Switching to fallback model in queue...`);
+    
   }
   throw lastError || new Error("All models in queue failed.");
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const { visualDescription, imagePrompt, voiceover, topic, model, style, visualStyle, character } = await req.json();
+    const { visualDescription, imagePrompt, voiceover, topic, style, visualStyle, character } = await req.json();
 
     if (!visualDescription && !imagePrompt && !voiceover) {
       return NextResponse.json({ error: "Missing scene data for prompt generation." }, { status: 400 });
@@ -74,7 +75,7 @@ PROMPT DESIGN INSTRUCTIONS:
 - The output must be concise (around 1-3 sentences), highly visual, and direct. Do not include any preambles like "Here is your prompt:" or quotes. Output ONLY the raw final English prompt itself.`;
 
     const response = await generateWithRetry({
-      model: model || "gemini-3.5-flash",
+      model: GEMINI_MODEL,
       contents: prompt,
     }) as any;
 

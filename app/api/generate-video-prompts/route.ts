@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
+import { GEMINI_MODEL } from "@/lib/gemini-model";
 
 export const maxDuration = 300;
 
@@ -13,13 +14,13 @@ const ai = new GoogleGenAI({
 });
 
 async function generateWithRetry(config: any, maxRetries = 3) {
-  const modelQueue = [config.model, 'gemini-1.5-pro', 'gemini-flash-latest'].filter((m, idx, self) => m && self.indexOf(m) === idx);
+  const modelQueue = [GEMINI_MODEL];
   let lastError: any = null;
 
   for (const currentModel of modelQueue) {
     for (let i = 0; i < maxRetries; i++) {
       try {
-        const activeConfig = { ...config, model: currentModel };
+        const activeConfig = { ...config, model: GEMINI_MODEL };
         const response = await ai.models.generateContent(activeConfig) as any;
         
         let text = response.text ? response.text.trim() : '';
@@ -33,7 +34,7 @@ async function generateWithRetry(config: any, maxRetries = 3) {
         }
       } catch (error: any) {
         lastError = error;
-        console.warn(`Failed with model ${currentModel} (Attempt ${i + 1}/${maxRetries}): ${error.message || error}`);
+        console.warn(`Gemini request failed (Attempt ${i + 1}/${maxRetries}): ${error.message || error}`);
         
         const isTransient = error.status === 429 || error.status === 503 || error.message?.includes('429') || error.message?.includes('503') || error.message?.includes('JSON_PARSE_ERROR');
         if (isTransient) {
@@ -44,14 +45,14 @@ async function generateWithRetry(config: any, maxRetries = 3) {
         }
       }
     }
-    console.log(`Switching to fallback model in queue...`);
+    
   }
   throw lastError || new Error("All models in queue failed.");
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const { scenes, topic, model, style, visualStyle, character } = await req.json();
+    const { scenes, topic, style, visualStyle, character } = await req.json();
 
     if (!scenes || !Array.isArray(scenes) || scenes.length === 0) {
       return NextResponse.json({ error: "No scenes provided." }, { status: 400 });
@@ -90,7 +91,7 @@ Return the result STRICTLY as a JSON array where each object has the following s
 Do not include any markdown formatting, just the raw JSON array.`;
 
     let updatedPrompts = await generateWithRetry({
-      model: model || "gemini-3.5-flash",
+      model: GEMINI_MODEL,
       contents: prompt,
       config: {
         responseMimeType: "application/json",
